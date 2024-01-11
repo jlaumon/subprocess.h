@@ -83,7 +83,11 @@ enum subprocess_option_e {
   // Search for program names in the PATH variable. Always enabled on Windows.
   // Note: this will **not** search for paths in any provided custom environment
   // and instead uses the PATH of the spawning process.
-  subprocess_option_search_user_path = 0x10
+  subprocess_option_search_user_path = 0x10,
+
+  // Command line is a single string containing all the arguments (within quotes
+  // if they contain spaces).
+  subprocess_option_single_string_command_line = 0x20
 };
 
 #if defined(__cplusplus)
@@ -481,6 +485,7 @@ int subprocess_create_ex(const char *const commandLine[], int options,
   char *commandLineCombined;
   subprocess_size_t len;
   int i, j;
+  int need_combining;
   int need_quoting;
   unsigned long flags = 0;
   const unsigned long startFUseStdHandles = 0x00000100;
@@ -514,6 +519,16 @@ int subprocess_create_ex(const char *const commandLine[], int options,
 
   if (subprocess_option_no_window == (options & subprocess_option_no_window)) {
     flags |= createNoWindow;
+  }
+
+  need_combining = (0 == (options & subprocess_option_single_string_command_line));
+
+  if (need_combining) {
+    // There should be a single string.
+    int i;
+    for (i = 0; commandLine[i]; i++) {}
+    if (i != 1)
+        return -1;
   }
 
   if (subprocess_option_inherit_environment !=
@@ -649,76 +664,81 @@ int subprocess_create_ex(const char *const commandLine[], int options,
     out_process->hEventError = SUBPROCESS_NULL;
   }
 
-  // Combine commandLine together into a single string
-  len = 0;
-  for (i = 0; commandLine[i]; i++) {
-    // for the trailing \0
-    len++;
-
-    // Quote the argument if it has a space in it
-    if (strpbrk(commandLine[i], "\t\v ") != SUBPROCESS_NULL)
-      len += 2;
-
-    for (j = 0; '\0' != commandLine[i][j]; j++) {
-      switch (commandLine[i][j]) {
-      default:
-        break;
-      case '\\':
-        if (commandLine[i][j + 1] == '"') {
-          len++;
-        }
-
-        break;
-      case '"':
-        len++;
-        break;
-      }
+  if (need_combining) {
+    // Combine commandLine together into a single string
+    len = 0;
+    for (i = 0; commandLine[i]; i++) {
+      // for the trailing \0
       len++;
-    }
-  }
 
-  commandLineCombined = SUBPROCESS_CAST(char *, _alloca(len));
+      // Quote the argument if it has a space in it
+      if (strpbrk(commandLine[i], "\t\v ") != SUBPROCESS_NULL)
+        len += 2;
 
-  if (!commandLineCombined) {
-    return -1;
-  }
+      for (j = 0; '\0' != commandLine[i][j]; j++) {
+        switch (commandLine[i][j]) {
+        default:
+          break;
+        case '\\':
+          if (commandLine[i][j + 1] == '"') {
+            len++;
+          }
 
-  // Gonna re-use len to store the write index into commandLineCombined
-  len = 0;
-
-  for (i = 0; commandLine[i]; i++) {
-    if (0 != i) {
-      commandLineCombined[len++] = ' ';
-    }
-
-    need_quoting = strpbrk(commandLine[i], "\t\v ") != SUBPROCESS_NULL;
-    if (need_quoting) {
-      commandLineCombined[len++] = '"';
-    }
-
-    for (j = 0; '\0' != commandLine[i][j]; j++) {
-      switch (commandLine[i][j]) {
-      default:
-        break;
-      case '\\':
-        if (commandLine[i][j + 1] == '"') {
-          commandLineCombined[len++] = '\\';
+          break;
+        case '"':
+          len++;
+          break;
         }
+        len++;
+      }
+    }
 
-        break;
-      case '"':
-        commandLineCombined[len++] = '\\';
-        break;
+    commandLineCombined = SUBPROCESS_CAST(char *, _alloca(len));
+
+    if (!commandLineCombined) {
+      return -1;
+    }
+
+    // Gonna re-use len to store the write index into commandLineCombined
+    len = 0;
+
+    for (i = 0; commandLine[i]; i++) {
+      if (0 != i) {
+        commandLineCombined[len++] = ' ';
       }
 
-      commandLineCombined[len++] = commandLine[i][j];
-    }
-    if (need_quoting) {
-      commandLineCombined[len++] = '"';
-    }
-  }
+      need_quoting = strpbrk(commandLine[i], "\t\v ") != SUBPROCESS_NULL;
+      if (need_quoting) {
+        commandLineCombined[len++] = '"';
+      }
 
-  commandLineCombined[len] = '\0';
+      for (j = 0; '\0' != commandLine[i][j]; j++) {
+        switch (commandLine[i][j]) {
+        default:
+          break;
+        case '\\':
+          if (commandLine[i][j + 1] == '"') {
+            commandLineCombined[len++] = '\\';
+          }
+
+          break;
+        case '"':
+          commandLineCombined[len++] = '\\';
+          break;
+        }
+
+        commandLineCombined[len++] = commandLine[i][j];
+      }
+      if (need_quoting) {
+        commandLineCombined[len++] = '"';
+      }
+    }
+
+    commandLineCombined[len] = '\0';
+  } else {
+    commandLineCombined = SUBPROCESS_CAST(char *, _alloca(strlen(commandLine[0]) + 1));
+    strcpy(commandLineCombined, commandLine[0]);
+  }
 
   if (!CreateProcessA(
           SUBPROCESS_NULL,
@@ -768,6 +788,12 @@ int subprocess_create_ex(const char *const commandLine[], int options,
     if (SUBPROCESS_NULL != environment) {
       return -1;
     }
+  }
+
+  if (subprocess_option_single_string_command_line ==
+      (options & subprocess_option_single_string_command_line)) {
+    // Single string option isn't supported.
+    return -1;
   }
 
   if (0 != pipe(stdinfd)) {
